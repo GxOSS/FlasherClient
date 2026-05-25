@@ -34,10 +34,6 @@ jobs:
             exe: picoclient
             out_ext: ""
 
-    defaults:
-      run:
-        working-directory: client
-
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +43,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: client -> target
+          workspaces: . -> target
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -62,7 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: picoclient-${{ matrix.target }}
-          path: client/dist/*
+          path: dist/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/client-v')
