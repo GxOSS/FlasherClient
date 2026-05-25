@@ -4,10 +4,13 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "picoclient")]
-#[command(about = "TCP client for PicoFlasher ESP32 server", long_about = None)]
+#[command(about = "PicoFlasher client (TCP or USB serial)", long_about = None)]
 pub struct Cli {
 	#[arg(long = "ip", alias = "addr", default_value = "192.168.4.1:3232")]
 	pub addr: String,
+
+	#[arg(long)]
+	pub serial: Option<String>,
 
 	#[arg(long, default_value = "3000")]
 	pub timeout_ms: u64,

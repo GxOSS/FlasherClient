@@ -1,13 +1,8 @@
-# PicoFlasher TCP Client
+# PicoFlasher Client
 
-This is a cross-platform Rust CLI for the ESP32 TCP server (`PFC1` protocol).
+PicoFlasher and ESPFlasher Client for windows, linux and macos
 
-## Build
-
-```bash
-cd /home/e3xp0/Projects/PicoFlasher/client
-cargo build --release
-```
+Supports [ESPFlasher](https://github.com/warp32767/espflasher) TCP server and [Hax360 PicoFlasher v4](https://codeberg.org/hax360/PicoFlasher) USB. 
 
 ## Usage
 
@@ -32,7 +27,7 @@ Write NAND from a file (file must be 0x210-per-block layout):
 ./target/release/picoclient write-nand --start 0 --input nand.bin
 ```
 
-Read eMMC (auto-detects size from EXT_CSD SEC_COUNT):
+Read eMMC (auto-detects size from EXT\_CSD SEC\_COUNT):
 
 ```bash
 ./target/release/picoclient read-emmc --out emmc.bin
@@ -41,5 +36,12 @@ Read eMMC (auto-detects size from EXT_CSD SEC_COUNT):
 Override address/timeout:
 
 ```bash
-./target/release/picoclient --ip 192.168.4.1:3232 --timeout-ms 5000 get-version
+./target/release/picoclient --ip 192.168.4.1:3232 --timeout-ms 5000 read-nand --out nand.bin
+```
+
+Use USB serial (original PicoFlasher CDC COM port):
+
+```bash
+./target/release/picoclient --serial /dev/ttyACM0 read-nand --out nand.bin
+./target/release/picoclient --serial COM3 write-nand --input nand.bin
 ```

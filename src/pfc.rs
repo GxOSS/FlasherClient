@@ -1,19 +1,12 @@
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Result};
 
-const PFC_MAGIC: u32 = 0x5046_4331;
-const PFC_VERSION: u16 = 1;
-
-const PFC_MSG_REQUEST: u16 = 0;
-const PFC_MSG_RESPONSE: u16 = 1;
+use crate::{pftcp, usb};
 
 pub const CMD_GET_VERSION: u8 = 0x00;
 pub const CMD_GET_FLASH_CONFIG: u8 = 0x01;
 pub const CMD_READ_FLASH: u8 = 0x02;
-#[allow(dead_code)]
 pub const CMD_WRITE_FLASH: u8 = 0x03;
 pub const CMD_READ_FLASH_STREAM: u8 = 0x04;
 #[allow(dead_code)]
@@ -22,7 +15,6 @@ pub const CMD_WRITE_FLASH_MULTI: u8 = 0x06;
 
 pub const CMD_SET_SMC_WORKAROUND: u8 = 0x20;
 pub const CMD_STOP_SMC: u8 = 0x21;
-#[allow(dead_code)]
 pub const CMD_START_SMC: u8 = 0x22;
 
 pub const CMD_EMMC_DETECT: u8 = 0x50;
@@ -34,130 +26,153 @@ pub const CMD_EMMC_GET_CSD: u8 = 0x53;
 pub const CMD_EMMC_GET_EXT_CSD: u8 = 0x54;
 pub const CMD_EMMC_READ: u8 = 0x55;
 pub const CMD_EMMC_READ_STREAM: u8 = 0x56;
-#[allow(dead_code)]
 pub const CMD_EMMC_WRITE: u8 = 0x57;
 pub const CMD_EMMC_WRITE_MULTI: u8 = 0x58;
 
-#[derive(Debug, Clone)]
-pub struct Frame {
-	pub msg_type: u16,
-	pub payload: Vec<u8>,
-}
+pub const NAND_BLOCK_BYTES: usize = 0x210;
+pub const EMMC_BLOCK_BYTES: usize = 0x200;
 
-pub struct Client {
-	stream: TcpStream,
+pub enum Client {
+	Tcp(pftcp::Client),
+	Usb(usb::Client),
 }
 
 impl Client {
-	pub fn connect<A: ToSocketAddrs>(addr: A, timeout: Duration) -> Result<(Self, SocketAddr)> {
-		let mut last_err: Option<anyhow::Error> = None;
-		let mut resolved: Option<SocketAddr> = None;
-
-		for sock in addr.to_socket_addrs().context("failed to resolve address")? {
-			resolved = Some(sock);
-			match TcpStream::connect_timeout(&sock, timeout) {
-				Ok(stream) => {
-					stream
-						.set_read_timeout(Some(timeout))
-						.context("failed to set read timeout")?;
-					stream
-						.set_write_timeout(Some(timeout))
-						.context("failed to set write timeout")?;
-					stream
-						.set_nodelay(true)
-						.context("failed to set nodelay")?;
-					return Ok((Self { stream }, sock));
-				}
-				Err(e) => last_err = Some(anyhow!(e).context(format!("connect to {sock} failed"))),
-			}
-		}
-
-		match (resolved, last_err) {
-			(Some(_), Some(e)) => Err(e),
-			_ => bail!("no socket addresses found"),
-		}
+	pub fn connect_tcp(addr: &str, timeout: Duration) -> Result<(Self, String)> {
+		let (c, resolved) = pftcp::Client::connect(addr, timeout)?;
+		Ok((Self::Tcp(c), resolved.to_string()))
 	}
 
-	pub fn send_request(&mut self, payload: &[u8]) -> Result<()> {
-		self.send_frame(PFC_MSG_REQUEST, payload)
+	pub fn connect_usb(port: &str, timeout: Duration) -> Result<(Self, String)> {
+		let c = usb::Client::open(port, timeout)?;
+		Ok((Self::Usb(c), port.to_string()))
 	}
 
-	pub fn recv_response(&mut self) -> Result<Frame> {
-		let frame = self.recv_frame()?;
-		if frame.msg_type != PFC_MSG_RESPONSE {
-			bail!("unexpected message type {}, expected response", frame.msg_type);
-		}
-		Ok(frame)
-	}
-
-	pub fn request_response(&mut self, payload: &[u8]) -> Result<Frame> {
-		self.send_request(payload)?;
-		self.recv_response()
-	}
-
-	#[allow(dead_code)]
-	pub fn send_cmd(&mut self, cmd: u8, lba: u32, extra: &[u8]) -> Result<()> {
-		let mut payload = Vec::with_capacity(5 + extra.len());
-		payload.push(cmd);
-		payload.extend_from_slice(&lba.to_le_bytes());
-		payload.extend_from_slice(extra);
-		self.send_request(&payload)
+	pub fn supports_multi_write(&self) -> bool {
+		matches!(self, Self::Tcp(_))
 	}
 
 	pub fn cmd_u32(&mut self, cmd: u8, lba: u32) -> Result<u32> {
-		let frame = self.request_response(&cmd_payload(cmd, lba))?;
-		if frame.payload.len() != 4 {
-			bail!("expected 4-byte response, got {}", frame.payload.len());
+		match self {
+			Self::Tcp(c) => c.cmd_u32(cmd, lba),
+			Self::Usb(c) => c.cmd_u32(cmd, lba),
 		}
-		Ok(u32::from_le_bytes(frame.payload[..4].try_into().unwrap()))
 	}
 
-	#[allow(dead_code)]
-	pub fn cmd_bytes(&mut self, cmd: u8, lba: u32) -> Result<Vec<u8>> {
-		let frame = self.request_response(&cmd_payload(cmd, lba))?;
-		Ok(frame.payload)
+	pub fn cmd_u8(&mut self, cmd: u8, lba: u32) -> Result<u8> {
+		match self {
+			Self::Tcp(c) => {
+				let frame = c.request_response(&pftcp::cmd_payload(cmd, lba))?;
+				if frame.payload.len() != 1 {
+					bail!("expected 1-byte response, got {}", frame.payload.len());
+				}
+				Ok(frame.payload[0])
+			}
+			Self::Usb(c) => c.cmd_u8(cmd, lba),
+		}
 	}
 
-	fn send_frame(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
-		let mut hdr = Vec::with_capacity(12);
-		hdr.extend_from_slice(&PFC_MAGIC.to_le_bytes());
-		hdr.extend_from_slice(&PFC_VERSION.to_le_bytes());
-		hdr.extend_from_slice(&msg_type.to_le_bytes());
-		hdr.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-
-		self.stream.write_all(&hdr).context("tcp write header failed")?;
-		if !payload.is_empty() {
-			self.stream
-				.write_all(payload)
-				.context("tcp write payload failed")?;
+	pub fn cmd_exact_bytes(&mut self, cmd: u8, lba: u32, len: usize) -> Result<Vec<u8>> {
+		match self {
+			Self::Tcp(c) => {
+				let frame = c.request_response(&pftcp::cmd_payload(cmd, lba))?;
+				if frame.payload.len() != len {
+					bail!("expected {}-byte response, got {}", len, frame.payload.len());
+				}
+				Ok(frame.payload)
+			}
+			Self::Usb(c) => c.cmd_exact_bytes(cmd, lba, len),
 		}
-		Ok(())
 	}
 
-	fn recv_frame(&mut self) -> Result<Frame> {
-		let mut hdr = [0u8; 12];
-		self.stream.read_exact(&mut hdr).context("tcp read header failed")?;
-
-		let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-		let version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
-		let msg_type = u16::from_le_bytes(hdr[6..8].try_into().unwrap());
-		let len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
-
-		if magic != PFC_MAGIC {
-			bail!("bad magic 0x{magic:08x}");
+	pub fn read_with_ret(&mut self, cmd: u8, lba: u32, data_len: usize) -> Result<(u32, Option<Vec<u8>>)> {
+		match self {
+			Self::Tcp(c) => {
+				let frame = c.request_response(&pftcp::cmd_payload(cmd, lba))?;
+				if frame.payload.len() < 4 {
+					bail!("short response ({} bytes)", frame.payload.len());
+				}
+				let ret = u32::from_le_bytes(frame.payload[0..4].try_into().unwrap());
+				if ret != 0 {
+					return Ok((ret, None));
+				}
+				if frame.payload.len() != 4 + data_len {
+					bail!("expected {}-byte payload, got {}", 4 + data_len, frame.payload.len());
+				}
+				Ok((ret, Some(frame.payload[4..].to_vec())))
+			}
+			Self::Usb(c) => c.read_with_ret(cmd, lba, data_len),
 		}
-		if version != PFC_VERSION {
-			bail!("unsupported version {version}");
+	}
+
+	pub fn start_stream(&mut self, cmd: u8, count: u32) -> Result<()> {
+		match self {
+			Self::Tcp(c) => c.send_request(&pftcp::cmd_payload(cmd, count)),
+			Self::Usb(c) => c.send_cmd(cmd, count, &[]),
+		}
+	}
+
+	pub fn recv_stream_block(&mut self, data_len: usize) -> Result<(u32, Option<Vec<u8>>)> {
+		match self {
+			Self::Tcp(c) => {
+				let frame = c.recv_response()?;
+				if frame.payload.len() < 4 {
+					bail!("short response ({} bytes)", frame.payload.len());
+				}
+				let ret = u32::from_le_bytes(frame.payload[0..4].try_into().unwrap());
+				if ret != 0 {
+					return Ok((ret, None));
+				}
+				if frame.payload.len() != 4 + data_len {
+					bail!("expected {}-byte payload, got {}", 4 + data_len, frame.payload.len());
+				}
+				Ok((ret, Some(frame.payload[4..].to_vec())))
+			}
+			Self::Usb(c) => c.recv_stream_block(data_len),
+		}
+	}
+
+	pub fn write_multi(&mut self, cmd: u8, lba: u32, block_bytes: usize, data: &[u8]) -> Result<(u32, u32)> {
+		let count = (data.len() / block_bytes) as u16;
+		if data.len() != (count as usize) * block_bytes {
+			bail!("data length must be a multiple of block size");
 		}
 
-		let mut payload = vec![0u8; len];
-		if len != 0 {
-			self.stream
-				.read_exact(&mut payload)
-				.context("tcp read payload failed")?;
+		match self {
+			Self::Tcp(c) => {
+				let mut payload = Vec::with_capacity(5 + 2 + data.len());
+				payload.push(cmd);
+				payload.extend_from_slice(&lba.to_le_bytes());
+				payload.extend_from_slice(&count.to_le_bytes());
+				payload.extend_from_slice(data);
+				c.send_request(&payload)?;
+				let frame = c.recv_response()?;
+				if frame.payload.len() != 8 {
+					bail!("expected 8-byte response, got {}", frame.payload.len());
+				}
+				let ret = u32::from_le_bytes(frame.payload[0..4].try_into().unwrap());
+				let idx = u32::from_le_bytes(frame.payload[4..8].try_into().unwrap());
+				Ok((ret, idx))
+			}
+			Self::Usb(_) => bail!("multi-write not supported over USB serial"),
 		}
+	}
 
-		Ok(Frame { msg_type, payload })
+	pub fn write_single(&mut self, cmd: u8, lba: u32, data: &[u8]) -> Result<u32> {
+		match self {
+			Self::Tcp(c) => {
+				let mut payload = Vec::with_capacity(5 + data.len());
+				payload.push(cmd);
+				payload.extend_from_slice(&lba.to_le_bytes());
+				payload.extend_from_slice(data);
+				let frame = c.request_response(&payload)?;
+				if frame.payload.len() != 4 {
+					bail!("expected 4-byte response, got {}", frame.payload.len());
+				}
+				Ok(u32::from_le_bytes(frame.payload[0..4].try_into().unwrap()))
+			}
+			Self::Usb(c) => c.write_single(cmd, lba, data),
+		}
 	}
 }
 
