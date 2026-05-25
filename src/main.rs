@@ -4,7 +4,7 @@ mod pfc;
 mod usb;
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -114,7 +114,8 @@ fn flash_size_from_config(flash_config: u32) -> Option<usize> {
 }
 
 fn read_nand(client: &mut Client, out: std::path::PathBuf, start: u32, count: u32) -> Result<()> {
-	let mut f = File::create(out).context("open output")?;
+	let f = File::create(out).context("open output")?;
+	let mut f = BufWriter::with_capacity(1024 * 1024, f);
 
 	if start == 0 {
 		client.start_stream(CMD_READ_FLASH_STREAM, count)?;
@@ -163,7 +164,7 @@ fn write_nand(client: &mut Client, input: std::path::PathBuf, start: u32) -> Res
 	if client.supports_multi_write() {
 		while i < blocks {
 			let remaining = blocks - i;
-			let chunk_blocks = remaining.min(8);
+			let chunk_blocks = remaining.min(15);
 			let lba = start + i;
 
 			let off = (i as usize) * NAND_BLOCK_BYTES;
@@ -221,7 +222,8 @@ fn prepare_emmc(client: &mut Client) -> Result<u32> {
 }
 
 fn read_emmc(client: &mut Client, out: std::path::PathBuf, start: u32, count: u32) -> Result<()> {
-	let mut f = File::create(out).context("open output")?;
+	let f = File::create(out).context("open output")?;
+	let mut f = BufWriter::with_capacity(1024 * 1024, f);
 
 	if start == 0 {
 		client.start_stream(CMD_EMMC_READ_STREAM, count)?;
@@ -270,7 +272,7 @@ fn write_emmc(client: &mut Client, input: std::path::PathBuf, start: u32) -> Res
 	if client.supports_multi_write() {
 		while i < blocks {
 			let remaining = blocks - i;
-			let chunk_blocks = remaining.min(16);
+			let chunk_blocks = remaining.min(15);
 			let lba = start + i;
 
 			let off = (i as usize) * EMMC_BLOCK_BYTES;
