@@ -164,7 +164,7 @@ fn write_nand(client: &mut Client, input: std::path::PathBuf, start: u32) -> Res
 	if client.supports_multi_write() {
 		while i < blocks {
 			let remaining = blocks - i;
-			let chunk_blocks = remaining.min(15);
+			let chunk_blocks = remaining.min(64);
 			let lba = start + i;
 
 			let off = (i as usize) * NAND_BLOCK_BYTES;
@@ -272,7 +272,7 @@ fn write_emmc(client: &mut Client, input: std::path::PathBuf, start: u32) -> Res
 	if client.supports_multi_write() {
 		while i < blocks {
 			let remaining = blocks - i;
-			let chunk_blocks = remaining.min(15);
+			let chunk_blocks = remaining.min(64);
 			let lba = start + i;
 
 			let off = (i as usize) * EMMC_BLOCK_BYTES;

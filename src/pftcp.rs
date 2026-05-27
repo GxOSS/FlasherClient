@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -17,7 +17,8 @@ pub struct Frame {
 }
 
 pub struct Client {
-	stream: TcpStream,
+	reader: BufReader<TcpStream>,
+	writer: BufWriter<TcpStream>,
 }
 
 impl Client {
@@ -38,7 +39,9 @@ impl Client {
 					stream
 						.set_nodelay(true)
 						.context("failed to set nodelay")?;
-					return Ok((Self { stream }, sock));
+					let reader = BufReader::with_capacity(64 * 1024, stream.try_clone().context("clone stream for reader")?);
+					let writer = BufWriter::with_capacity(64 * 1024, stream);
+					return Ok((Self { reader, writer }, sock));
 				}
 				Err(e) => last_err = Some(anyhow!(e).context(format!("connect to {sock} failed"))),
 			}
@@ -91,24 +94,25 @@ impl Client {
 	}
 
 	fn send_frame(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
-		let mut hdr = Vec::with_capacity(12);
-		hdr.extend_from_slice(&PFC_MAGIC.to_le_bytes());
-		hdr.extend_from_slice(&PFC_VERSION.to_le_bytes());
-		hdr.extend_from_slice(&msg_type.to_le_bytes());
-		hdr.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+		let mut hdr = [0u8; 12];
+		hdr[0..4].copy_from_slice(&PFC_MAGIC.to_le_bytes());
+		hdr[4..6].copy_from_slice(&PFC_VERSION.to_le_bytes());
+		hdr[6..8].copy_from_slice(&msg_type.to_le_bytes());
+		hdr[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
 
-		self.stream.write_all(&hdr).context("tcp write header failed")?;
+		self.writer.write_all(&hdr).context("tcp write header failed")?;
 		if !payload.is_empty() {
-			self.stream
+			self.writer
 				.write_all(payload)
 				.context("tcp write payload failed")?;
 		}
+		self.writer.flush().context("tcp flush failed")?;
 		Ok(())
 	}
 
 	fn recv_frame(&mut self) -> Result<Frame> {
 		let mut hdr = [0u8; 12];
-		self.stream.read_exact(&mut hdr).context("tcp read header failed")?;
+		self.reader.read_exact(&mut hdr).context("tcp read header failed")?;
 
 		let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
 		let version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
@@ -124,7 +128,7 @@ impl Client {
 
 		let mut payload = vec![0u8; len];
 		if len != 0 {
-			self.stream
+			self.reader
 				.read_exact(&mut payload)
 				.context("tcp read payload failed")?;
 		}
