@@ -112,6 +112,7 @@ impl Client {
 		}
 	}
 
+	#[allow(dead_code)]
 	pub fn recv_stream_block(&mut self, data_len: usize) -> Result<(u32, Option<Vec<u8>>)> {
 		match self {
 			Self::Tcp(c) => {
@@ -129,6 +130,40 @@ impl Client {
 				Ok((ret, Some(frame.payload[4..].to_vec())))
 			}
 			Self::Usb(c) => c.recv_stream_block(data_len),
+		}
+	}
+
+	/// Zero-allocation stream block receive. Reads directly into `buf` (must be >= 4 + data_len).
+	/// Returns the ret code and, on success, a slice of `buf` containing the data.
+	pub fn recv_stream_block_into<'a>(&mut self, buf: &'a mut [u8], data_len: usize) -> Result<(u32, Option<&'a [u8]>)> {
+		match self {
+			Self::Tcp(c) => {
+				let (msg_type, n) = c.recv_frame_into(buf)?;
+				if msg_type != 1 {
+					bail!("unexpected message type {msg_type}, expected response");
+				}
+				if n < 4 {
+					bail!("short response ({n} bytes)");
+				}
+				let ret = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+				if ret != 0 {
+					return Ok((ret, None));
+				}
+				if n != 4 + data_len {
+					bail!("expected {}-byte payload, got {n}", 4 + data_len);
+				}
+				Ok((0, Some(&buf[4..4 + data_len])))
+			}
+			Self::Usb(c) => {
+				// Fallback: USB path still allocates
+				let (ret, data) = c.recv_stream_block(data_len)?;
+				if let Some(d) = data {
+					buf[4..4 + d.len()].copy_from_slice(&d);
+					Ok((ret, Some(&buf[4..4 + d.len()])))
+				} else {
+					Ok((ret, None))
+				}
+			}
 		}
 	}
 

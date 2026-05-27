@@ -7,3 +7,4 @@ edition = "2021"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serialport = "4"
+socket2 = { version = "0.5", features = ["all"] }

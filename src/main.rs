@@ -119,12 +119,13 @@ fn read_nand(client: &mut Client, out: std::path::PathBuf, start: u32, count: u3
 
 	if start == 0 {
 		client.start_stream(CMD_READ_FLASH_STREAM, count)?;
+		let mut rxbuf = vec![0u8; 4 + NAND_BLOCK_BYTES];
 		for i in 0..count {
-			let (ret, data) = client.recv_stream_block(NAND_BLOCK_BYTES)?;
+			let (ret, data) = client.recv_stream_block_into(&mut rxbuf, NAND_BLOCK_BYTES)?;
 			if ret != 0 {
 				bail!("read failed at block {i}: 0x{ret:08x}");
 			}
-			f.write_all(&data.unwrap()).context("write output")?;
+			f.write_all(data.unwrap()).context("write output")?;
 
 			if (i & 0xFF) == 0 {
 				eprintln!("read {}/{} blocks", i + 1, count);
@@ -164,7 +165,7 @@ fn write_nand(client: &mut Client, input: std::path::PathBuf, start: u32) -> Res
 	if client.supports_multi_write() {
 		while i < blocks {
 			let remaining = blocks - i;
-			let chunk_blocks = remaining.min(64);
+			let chunk_blocks = remaining.min(32);
 			let lba = start + i;
 
 			let off = (i as usize) * NAND_BLOCK_BYTES;
@@ -227,12 +228,13 @@ fn read_emmc(client: &mut Client, out: std::path::PathBuf, start: u32, count: u3
 
 	if start == 0 {
 		client.start_stream(CMD_EMMC_READ_STREAM, count)?;
+		let mut rxbuf = vec![0u8; 4 + EMMC_BLOCK_BYTES];
 		for i in 0..count {
-			let (ret, data) = client.recv_stream_block(EMMC_BLOCK_BYTES)?;
+			let (ret, data) = client.recv_stream_block_into(&mut rxbuf, EMMC_BLOCK_BYTES)?;
 			if ret != 0 {
 				bail!("read failed at block {i}: {ret}");
 			}
-			f.write_all(&data.unwrap()).context("write output")?;
+			f.write_all(data.unwrap()).context("write output")?;
 
 			if (i & 0xFF) == 0 {
 				eprintln!("read {}/{} blocks", i + 1, count);
@@ -272,7 +274,7 @@ fn write_emmc(client: &mut Client, input: std::path::PathBuf, start: u32) -> Res
 	if client.supports_multi_write() {
 		while i < blocks {
 			let remaining = blocks - i;
-			let chunk_blocks = remaining.min(64);
+			let chunk_blocks = remaining.min(32);
 			let lba = start + i;
 
 			let off = (i as usize) * EMMC_BLOCK_BYTES;
