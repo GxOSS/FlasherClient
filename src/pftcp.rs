@@ -3,7 +3,6 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use socket2::Socket;
 
 const PFC_MAGIC: u32 = 0x5046_4331;
 const PFC_VERSION: u16 = 1;
@@ -40,15 +39,7 @@ impl Client {
 					stream
 						.set_nodelay(true)
 						.context("failed to set nodelay")?;
-
-					// Enlarge kernel socket buffers for throughput
-					let raw: Socket = Socket::from(stream.try_clone().context("clone for socket2")?);
-					let _ = raw.set_recv_buffer_size(512 * 1024);
-					let _ = raw.set_send_buffer_size(512 * 1024);
-					// Prevent socket2 from closing the fd
-					std::mem::forget(raw);
-
-					let reader = BufReader::with_capacity(256 * 1024, stream.try_clone().context("clone stream for reader")?);
+					let reader = BufReader::with_capacity(64 * 1024, stream.try_clone().context("clone stream for reader")?);
 					let writer = BufWriter::with_capacity(64 * 1024, stream);
 					return Ok((Self { reader, writer }, sock));
 				}
@@ -143,36 +134,6 @@ impl Client {
 		}
 
 		Ok(Frame { msg_type, payload })
-	}
-
-	/// Read a response frame directly into the provided buffer, avoiding allocation.
-	/// Returns (msg_type, bytes_written). Buffer must be large enough for the payload.
-	pub fn recv_frame_into(&mut self, buf: &mut [u8]) -> Result<(u16, usize)> {
-		let mut hdr = [0u8; 12];
-		self.reader.read_exact(&mut hdr).context("tcp read header failed")?;
-
-		let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-		let version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
-		let msg_type = u16::from_le_bytes(hdr[6..8].try_into().unwrap());
-		let len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
-
-		if magic != PFC_MAGIC {
-			bail!("bad magic 0x{magic:08x}");
-		}
-		if version != PFC_VERSION {
-			bail!("unsupported version {version}");
-		}
-		if len > buf.len() {
-			bail!("frame payload {len} exceeds buffer size {}", buf.len());
-		}
-
-		if len != 0 {
-			self.reader
-				.read_exact(&mut buf[..len])
-				.context("tcp read payload failed")?;
-		}
-
-		Ok((msg_type, len))
 	}
 }
 
